@@ -1,5 +1,6 @@
 import requests
 import time
+import numpy as np
 from datetime import datetime
 
 # =========================================================
@@ -30,10 +31,68 @@ def send(text):
     )
 
 # =========================================================
-# COINGECKO GAINERS
+# RSI
 # =========================================================
 
-def get_coingecko():
+def calc_rsi(closes, period=14):
+
+    if len(closes) < period + 1:
+        return 50
+
+    closes = np.array(closes)
+
+    deltas = np.diff(closes)
+
+    gains = np.where(deltas > 0, deltas, 0)
+    losses = np.where(deltas < 0, -deltas, 0)
+
+    avg_gain = np.mean(gains[:period])
+    avg_loss = np.mean(losses[:period])
+
+    for i in range(period, len(gains)):
+
+        avg_gain = (
+            avg_gain * (period - 1)
+            + gains[i]
+        ) / period
+
+        avg_loss = (
+            avg_loss * (period - 1)
+            + losses[i]
+        ) / period
+
+    if avg_loss == 0:
+        return 100
+
+    rs = avg_gain / avg_loss
+
+    return round(
+        100 - (100 / (1 + rs)),
+        1
+    )
+
+# =========================================================
+# TELEGRAM
+# =========================================================
+
+def send(text):
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    requests.post(
+        url,
+        json={
+            "chat_id": CHAT_ID,
+            "text": text
+        },
+        timeout=15
+    )
+
+# =========================================================
+# GET GAINERS
+# =========================================================
+
+def get_coins():
 
     url = "https://api.coingecko.com/api/v3/coins/markets"
 
@@ -80,35 +139,13 @@ def get_coingecko():
             if volume < MIN_VOLUME:
                 continue
 
-            score = change
-
-            # volume strength
-            vol_mc = volume / max(market_cap, 1)
-
-            score += min(
-                vol_mc * 100,
-                80
-            )
-
-            # small cap bonus
-            if market_cap < 500_000_000:
-                score += 15
-
-            elif market_cap < 2_000_000_000:
-                score += 8
-
-            # giga volume
-            if volume > 50_000_000:
-                score += 10
-
             results.append({
+                "id": c["id"],
                 "symbol": c["symbol"].upper(),
                 "price": c["current_price"],
                 "change": round(change, 2),
                 "volume": volume,
-                "market_cap": market_cap,
-                "score": round(score, 1),
-                "source": "CoinGecko"
+                "market_cap": market_cap
             })
 
         except:
@@ -117,109 +154,151 @@ def get_coingecko():
     return results
 
 # =========================================================
-# DEXSCREENER TRENDING
+# GET PRICE CHART
 # =========================================================
 
-def get_dexscreener():
+def get_chart(coin_id, days):
 
-    url = "https://api.dexscreener.com/latest/dex/search"
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
 
-    keywords = [
-        "lab",
-        "cos",
-        "bill",
-        "meme",
-        "ai"
-    ]
+    params = {
+        "vs_currency": "usd",
+        "days": days
+    }
 
-    results = []
+    r = requests.get(
+        url,
+        params=params,
+        timeout=30
+    )
 
-    for k in keywords:
+    data = r.json()
 
-        try:
+    prices = data["prices"]
 
-            r = requests.get(
-                url,
-                params={"q": k},
-                timeout=20
-            )
-
-            data = r.json()
-
-            pairs = data.get("pairs", [])
-
-            for p in pairs[:5]:
-
-                try:
-
-                    symbol = p["baseToken"]["symbol"]
-
-                    volume = float(
-                        p.get("volume", {}).get(
-                            "h24",
-                            0
-                        )
-                    )
-
-                    change = float(
-                        p.get("priceChange", {}).get(
-                            "h24",
-                            0
-                        )
-                    )
-
-                    liquidity = float(
-                        p.get("liquidity", {}).get(
-                            "usd",
-                            0
-                        )
-                    )
-
-                    price = float(
-                        p.get("priceUsd", 0)
-                    )
-
-                    if change < 10:
-                        continue
-
-                    score = (
-                        change
-                        + min(volume / 1_000_000, 50)
-                    )
-
-                    if liquidity < 100_000:
-                        score += 10
-
-                    results.append({
-                        "symbol": symbol,
-                        "price": price,
-                        "change": round(change, 2),
-                        "volume": volume,
-                        "market_cap": liquidity,
-                        "score": round(score, 1),
-                        "source": "DexScreener"
-                    })
-
-                except:
-                    continue
-
-        except:
-            continue
-
-        time.sleep(0.5)
-
-    return results
+    return [p[1] for p in prices]
 
 # =========================================================
-# ALERT LEVEL
+# MULTI RSI
+# =========================================================
+
+def get_multi_rsi(coin_id):
+
+    try:
+
+        rsi_15m = calc_rsi(
+            get_chart(coin_id, "1")[-20:]
+        )
+
+        rsi_1h = calc_rsi(
+            get_chart(coin_id, "1")[-40:]
+        )
+
+        rsi_4h = calc_rsi(
+            get_chart(coin_id, "7")[-40:]
+        )
+
+        rsi_12h = calc_rsi(
+            get_chart(coin_id, "14")[-40:]
+        )
+
+        rsi_1d = calc_rsi(
+            get_chart(coin_id, "30")[-40:]
+        )
+
+        return {
+            "15m": rsi_15m,
+            "1h": rsi_1h,
+            "4h": rsi_4h,
+            "12h": rsi_12h,
+            "1d": rsi_1d
+        }
+
+    except:
+
+        return None
+
+# =========================================================
+# CLASSIFY
+# =========================================================
+
+def classify_pump(rsis):
+
+    hot = 0
+
+    for r in rsis.values():
+
+        if r >= 70:
+            hot += 1
+
+    if hot >= 5:
+        return "☠️ BLOWOFF TOP"
+
+    if (
+        rsis["4h"] >= 75
+        and rsis["12h"] >= 75
+        and rsis["1d"] >= 70
+    ):
+        return "🚀 SUPER PUMP"
+
+    if (
+        rsis["15m"] >= 70
+        and rsis["1h"] >= 70
+        and rsis["4h"] >= 70
+    ):
+        return "🔥 STRONG PUMP"
+
+    if rsis["15m"] >= 70:
+        return "🌱 EARLY PUMP"
+
+    return "🟡 NORMAL"
+
+# =========================================================
+# SCORE
+# =========================================================
+
+def calc_score(change, volume, market_cap, rsis):
+
+    score = change
+
+    vol_mc = volume / max(market_cap, 1)
+
+    score += min(
+        vol_mc * 100,
+        80
+    )
+
+    if market_cap < 500_000_000:
+        score += 15
+
+    if volume > 50_000_000:
+        score += 10
+
+    # RSI bonuses
+
+    for r in rsis.values():
+
+        if r >= 70:
+            score += 5
+
+        if r >= 80:
+            score += 5
+
+    return round(score, 1)
+
+# =========================================================
+# LEVEL
 # =========================================================
 
 def get_level(score):
 
-    if score >= 80:
+    if score >= 100:
+        return "☠️☠️☠️"
+
+    if score >= 70:
         return "🚨🚨🚨"
 
-    if score >= 50:
+    if score >= 45:
         return "🚨🚨"
 
     return "🚨"
@@ -234,99 +313,69 @@ def main():
         "%H:%M UTC %d/%m/%Y"
     )
 
-    all_coins = []
-
-    # =====================================================
-    # COINGECKO
-    # =====================================================
-
     try:
 
-        cg = get_coingecko()
-
-        all_coins.extend(cg)
+        coins = get_coins()
 
     except Exception as e:
 
-        print("CG ERROR", e)
-
-    # =====================================================
-    # DEXSCREENER
-    # =====================================================
-
-    try:
-
-        ds = get_dexscreener()
-
-        all_coins.extend(ds)
-
-    except Exception as e:
-
-        print("DEX ERROR", e)
-
-    if not all_coins:
-
-        send("❌ No alpha coins found")
+        send(f"❌ API ERROR\n{e}")
 
         return
 
-    # =====================================================
-    # SORT
-    # =====================================================
+    final = []
 
-    all_coins.sort(
+    for c in coins[:20]:
+
+        try:
+
+            rsis = get_multi_rsi(c["id"])
+
+            if not rsis:
+                continue
+
+            pump_type = classify_pump(rsis)
+
+            score = calc_score(
+                c["change"],
+                c["volume"],
+                c["market_cap"],
+                rsis
+            )
+
+            c["rsis"] = rsis
+            c["score"] = score
+            c["pump_type"] = pump_type
+
+            final.append(c)
+
+            time.sleep(1)
+
+        except Exception as e:
+
+            print(e)
+
+            continue
+
+    final.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    # remove duplicates
-    final = []
-
-    seen = set()
-
-    for c in all_coins:
-
-        if c["symbol"] in seen:
-            continue
-
-        seen.add(c["symbol"])
-
-        final.append(c)
-
-    final = final[:20]
-
-    # =====================================================
-    # HEADER
-    # =====================================================
-
     send(
-        f"🔥 ALPHA FUTURES SCANNER\n"
+        f"🔥 MULTI RSI FUTURES SCANNER\n"
         f"{len(final)} hot coins\n"
         f"{now}"
     )
 
-    # =====================================================
-    # SEND ALERTS
-    # =====================================================
-
-    for c in final:
+    for c in final[:15]:
 
         try:
 
             level = get_level(c["score"])
 
-            volume_m = round(
-                c["volume"] / 1_000_000,
-                1
-            )
-
-            marketcap_m = round(
-                c["market_cap"] / 1_000_000,
-                1
-            )
-
             msg = f"""
-{level} ALPHA PUMP ALERT
+{level} {c['pump_type']}
 
 🔥 {c['symbol']}
 💰 ${c['price']}
@@ -335,10 +384,14 @@ def main():
 
 ⚡ Score: {c['score']}
 
-💵 Volume: ${volume_m}M
-🏦 Size: ${marketcap_m}M
+RSI:
+15m: {c['rsis']['15m']}
+1h: {c['rsis']['1h']}
+4h: {c['rsis']['4h']}
+12h: {c['rsis']['12h']}
+1D: {c['rsis']['1d']}
 
-📡 Source: {c['source']}
+💵 Vol: ${round(c['volume']/1_000_000,1)}M
 
 👀 SHORT WATCHLIST
 """
@@ -347,10 +400,7 @@ def main():
 
             time.sleep(1)
 
-        except Exception as e:
-
-            print(e)
-
+        except:
             continue
 
 if __name__ == "__main__":
