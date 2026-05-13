@@ -32,7 +32,7 @@ def send(text):
 def calc_rsi(closes, period=14):
 
     if len(closes) < period + 1:
-        return 50
+        return None
 
     closes = np.array(closes)
 
@@ -67,7 +67,7 @@ def calc_rsi(closes, period=14):
     )
 
 # =========================================================
-# GET MARKET MOVERS
+# GET COINS
 # =========================================================
 
 def get_coins():
@@ -106,12 +106,17 @@ def get_coins():
                 0
             )
 
-            if abs(change) < 5:
+            # ONLY ACTIVE PUMPS
+
+            if change < 12:
                 continue
 
-            score = (
-                abs(change)
-                + min(volume / 20_000_000, 50)
+            if volume < 20_000_000:
+                continue
+
+            momentum = (
+                change
+                + min(volume / 50_000_000, 40)
             )
 
             results.append({
@@ -120,21 +125,21 @@ def get_coins():
                 "price": c["current_price"],
                 "change": round(change, 2),
                 "volume": volume,
-                "score": round(score, 1)
+                "momentum": round(momentum, 1)
             })
 
         except:
             continue
 
     results.sort(
-        key=lambda x: x["score"],
+        key=lambda x: x["momentum"],
         reverse=True
     )
 
-    return results[:30]
+    return results[:25]
 
 # =========================================================
-# GET PRICE DATA
+# GET CHART
 # =========================================================
 
 def get_chart(coin_id, days):
@@ -158,41 +163,34 @@ def get_chart(coin_id, days):
 
         prices = data["prices"]
 
-        return [p[1] for p in prices]
+        closes = [p[1] for p in prices]
+
+        if len(closes) < 20:
+            return None
+
+        return closes
 
     except:
 
-        return []
+        return None
 
 # =========================================================
-# MULTI RSI
+# RSI SET
 # =========================================================
 
 def get_rsis(coin_id):
 
-    try:
+    d1 = get_chart(coin_id, "1")
+    d7 = get_chart(coin_id, "7")
 
-        d1 = get_chart(coin_id, "1")
-        d7 = get_chart(coin_id, "7")
-        d30 = get_chart(coin_id, "30")
+    if not d1 or not d7:
+        return None
 
-        return {
-            "15m": calc_rsi(d1[-20:]),
-            "1h": calc_rsi(d1[-40:]),
-            "4h": calc_rsi(d7[-40:]),
-            "12h": calc_rsi(d30[-40:]),
-            "1d": calc_rsi(d30[-80:])
-        }
-
-    except:
-
-        return {
-            "15m": 50,
-            "1h": 50,
-            "4h": 50,
-            "12h": 50,
-            "1d": 50
-        }
+    return {
+        "15m": calc_rsi(d1[-20:]),
+        "1h": calc_rsi(d1[-40:]),
+        "4h": calc_rsi(d7[-40:])
+    }
 
 # =========================================================
 # CLASSIFY
@@ -203,17 +201,13 @@ def classify(rsis):
     r15 = rsis["15m"]
     r1h = rsis["1h"]
     r4h = rsis["4h"]
-    r12 = rsis["12h"]
-    r1d = rsis["1d"]
 
-    # live parabolic squeeze
     if (
         r15 >= 85
         and r1h >= 80
     ):
         return "☠️ LIVE SHORT SQUEEZE"
 
-    # extremely strong trend
     if (
         r15 >= 80
         and r1h >= 75
@@ -221,35 +215,13 @@ def classify(rsis):
     ):
         return "🚀 SUPER PUMP"
 
-    # strong continuation
     if (
         r15 >= 70
         and r1h >= 70
     ):
         return "🔥 STRONG PUMP"
 
-    # beginning momentum
-    if r15 >= 65:
-        return "🌱 EARLY PUMP"
-
-    return "🟡 NORMAL"
-
-# =========================================================
-# ALERT LEVEL
-# =========================================================
-
-def level(score):
-
-    if score >= 70:
-        return "☠️☠️☠️"
-
-    if score >= 50:
-        return "🚨🚨🚨"
-
-    if score >= 30:
-        return "🚨🚨"
-
-    return "🚨"
+    return None
 
 # =========================================================
 # MAIN
@@ -271,11 +243,7 @@ def main():
 
         return
 
-    send(
-        f"🔥 LIVE MOMENTUM SCANNER\n"
-        f"{len(coins)} movers\n"
-        f"{now}"
-    )
+    final = []
 
     for c in coins:
 
@@ -283,41 +251,73 @@ def main():
 
             rsis = get_rsis(c["id"])
 
+            if not rsis:
+                continue
+
             pump = classify(rsis)
 
-            lv = level(c["score"])
+            # ONLY HOT PUMPS
 
-            msg = f"""
-{lv} {pump}
+            if not pump:
+                continue
+
+            c["rsis"] = rsis
+            c["pump"] = pump
+
+            final.append(c)
+
+            time.sleep(0.8)
+
+        except:
+            continue
+
+    # SORT HOTTEST
+    final.sort(
+        key=lambda x: (
+            x["rsis"]["15m"]
+            + x["rsis"]["1h"]
+            + x["momentum"]
+        ),
+        reverse=True
+    )
+
+    if not final:
+
+        send("🟡 No strong live pumps now")
+
+        return
+
+    send(
+        f"🔥 LIVE PUMP SCANNER\n"
+        f"{len(final)} strong pumps\n"
+        f"{now}"
+    )
+
+    for c in final[:10]:
+
+        msg = f"""
+{c['pump']}
 
 🔥 {c['symbol']}
 💰 ${c['price']}
 
-📈 24h: {c['change']}%
+📈 24h: +{c['change']}%
 
-⚡ Momentum: {c['score']}
+⚡ Momentum: {c['momentum']}
 
 RSI:
-15m: {rsis['15m']}
-1h: {rsis['1h']}
-4h: {rsis['4h']}
-12h: {rsis['12h']}
-1D: {rsis['1d']}
+15m: {c['rsis']['15m']}
+1h: {c['rsis']['1h']}
+4h: {c['rsis']['4h']}
 
 💵 Vol: ${round(c['volume']/1_000_000,1)}M
 
 👀 SHORT WATCHLIST
 """
 
-            send(msg.strip())
+        send(msg.strip())
 
-            time.sleep(1)
-
-        except Exception as e:
-
-            print(e)
-
-            continue
+        time.sleep(1)
 
 if __name__ == "__main__":
     main()
