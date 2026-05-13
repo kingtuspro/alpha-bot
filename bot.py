@@ -1,12 +1,3 @@
-"""
-Alpha Futures Exhaustion Bot
-Optimized for GitHub Actions Free
-Purpose:
-Detect futures coins pumping too hard -> possible short scalp
-
-Exchange: Binance Futures
-"""
-
 import os
 import time
 import logging
@@ -15,27 +6,26 @@ from datetime import datetime, timezone
 import requests
 import numpy as np
 
-# =========================
+# =========================================================
 # CONFIG
-# =========================
+# =========================================================
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 CHAT_ID = os.environ.get("CHAT_ID", "")
 
-BASE = "https://fapi.binance.com"
+BASE = "https://api.bybit.com"
 
 MIN_24H_CHANGE = 8
 MIN_VOLUME_USDT = 10_000_000
 
 TOP_COINS = 25
 
-# RSI thresholds
 RSI_5M_LIMIT = 78
 RSI_15M_LIMIT = 75
 
-# =========================
+# =========================================================
 # LOGGING
-# =========================
+# =========================================================
 
 logging.basicConfig(
     level=logging.INFO,
@@ -44,12 +34,14 @@ logging.basicConfig(
 
 log = logging.getLogger(__name__)
 
-# =========================
+# =========================================================
 # TELEGRAM
-# =========================
+# =========================================================
 
 def send_tg(text):
+
     try:
+
         r = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={
@@ -58,16 +50,47 @@ def send_tg(text):
             },
             timeout=10
         )
+
         return r.status_code == 200
 
     except Exception as e:
+
         log.error(f"Telegram error: {e}")
+
         return False
 
+# =========================================================
+# REQUEST RETRY
+# =========================================================
 
-# =========================
+def safe_get(url, params=None, retries=3):
+
+    for i in range(retries):
+
+        try:
+
+            r = requests.get(
+                url,
+                params=params,
+                timeout=15
+            )
+
+            if r.status_code == 200:
+                return r.json()
+
+            log.warning(f"HTTP {r.status_code} | retry {i+1}")
+
+        except Exception as e:
+
+            log.warning(f"Request error: {e}")
+
+        time.sleep(1)
+
+    return None
+
+# =========================================================
 # RSI
-# =========================
+# =========================================================
 
 def calc_rsi(closes, period=14):
 
@@ -85,30 +108,43 @@ def calc_rsi(closes, period=14):
     avg_loss = np.mean(losses[:period])
 
     for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+        avg_gain = (
+            (avg_gain * (period - 1)) + gains[i]
+        ) / period
+
+        avg_loss = (
+            (avg_loss * (period - 1)) + losses[i]
+        ) / period
 
     if avg_loss == 0:
         return 100
 
     rs = avg_gain / avg_loss
 
-    return round(100 - (100 / (1 + rs)), 1)
+    return round(
+        100 - (100 / (1 + rs)),
+        1
+    )
 
-
-# =========================
-# API
-# =========================
+# =========================================================
+# FUTURES TICKERS
+# =========================================================
 
 def get_futures_tickers():
 
-    url = f"{BASE}/fapi/v1/ticker/24hr"
+    url = f"{BASE}/v5/market/tickers"
 
-    r = requests.get(url, timeout=15)
+    params = {
+        "category": "linear"
+    }
 
-    r.raise_for_status()
+    raw = safe_get(url, params)
 
-    data = r.json()
+    if not raw:
+        return []
+
+    data = raw["result"]["list"]
 
     results = []
 
@@ -116,78 +152,101 @@ def get_futures_tickers():
 
         symbol = t["symbol"]
 
-        # only USDT perpetual
         if not symbol.endswith("USDT"):
             continue
 
-        if "_" in symbol:
-            continue
-
         try:
-            change = float(t["priceChangePercent"])
-            quote_vol = float(t["quoteVolume"])
+
+            change = float(t["price24hPcnt"]) * 100
+            volume = float(t["turnover24h"])
             price = float(t["lastPrice"])
 
             if change < MIN_24H_CHANGE:
                 continue
 
-            if quote_vol < MIN_VOLUME_USDT:
+            if volume < MIN_VOLUME_USDT:
                 continue
 
             results.append({
                 "symbol": symbol,
-                "change_24h": change,
-                "quoteVolume": quote_vol,
+                "change_24h": round(change, 2),
+                "quoteVolume": volume,
                 "price": price
             })
 
         except:
             continue
 
-    results.sort(key=lambda x: x["change_24h"], reverse=True)
+    results.sort(
+        key=lambda x: x["change_24h"],
+        reverse=True
+    )
 
     return results[:TOP_COINS]
 
+# =========================================================
+# KLINES
+# =========================================================
 
 def get_klines(symbol, interval="5m", limit=100):
 
-    url = f"{BASE}/fapi/v1/klines"
+    interval_map = {
+        "5m": "5",
+        "15m": "15",
+        "1h": "60"
+    }
+
+    url = f"{BASE}/v5/market/kline"
 
     params = {
+        "category": "linear",
         "symbol": symbol,
-        "interval": interval,
+        "interval": interval_map[interval],
         "limit": limit
     }
 
-    r = requests.get(url, params=params, timeout=10)
+    raw = safe_get(url, params)
 
-    if r.status_code != 200:
+    if not raw:
         return []
 
-    return r.json()
+    return raw["result"]["list"]
 
-
-# =========================
+# =========================================================
 # ANALYSIS
-# =========================
+# =========================================================
 
 def get_rsi(symbol, tf):
 
     try:
-        klines = get_klines(symbol, tf, 100)
+
+        klines = get_klines(
+            symbol,
+            tf,
+            100
+        )
+
+        klines = list(reversed(klines))
 
         closes = [float(k[4]) for k in klines]
 
         return calc_rsi(closes)
 
     except:
-        return None
 
+        return None
 
 def get_volume_spike(symbol):
 
     try:
-        klines = get_klines(symbol, "5m", 50)
+
+        klines = get_klines(
+            symbol,
+            "5m",
+            50
+        )
+
+        klines = list(reversed(klines))
 
         vols = [float(k[5]) for k in klines]
 
@@ -201,49 +260,74 @@ def get_volume_spike(symbol):
         return round(current / avg, 2)
 
     except:
-        return 1
 
+        return 1
 
 def get_1h_change(symbol):
 
     try:
-        klines = get_klines(symbol, "1h", 2)
+
+        klines = get_klines(
+            symbol,
+            "1h",
+            2
+        )
+
+        klines = list(reversed(klines))
 
         open_price = float(klines[0][1])
+
         current_price = float(klines[-1][4])
 
-        change = ((current_price - open_price) / open_price) * 100
+        change = (
+            (current_price - open_price)
+            / open_price
+        ) * 100
 
         return round(change, 2)
 
     except:
-        return 0
 
+        return 0
 
 def get_funding(symbol):
 
     try:
-        url = f"{BASE}/fapi/v1/premiumIndex"
 
-        r = requests.get(
+        url = f"{BASE}/v5/market/tickers"
+
+        raw = safe_get(
             url,
-            params={"symbol": symbol},
-            timeout=8
+            {
+                "category": "linear",
+                "symbol": symbol
+            }
         )
 
-        data = r.json()
+        if not raw:
+            return 0
 
-        return round(float(data["lastFundingRate"]) * 100, 4)
+        data = raw["result"]["list"][0]
+
+        return round(
+            float(data["fundingRate"]) * 100,
+            4
+        )
 
     except:
+
         return 0
 
+# =========================================================
+# ALERT LEVEL
+# =========================================================
 
-# =========================
-# ALERT LOGIC
-# =========================
-
-def get_alert_level(rsi5, rsi15, vol_spike, p1h):
+def get_alert_level(
+    rsi5,
+    rsi15,
+    vol_spike,
+    p1h
+):
 
     score = 0
 
@@ -267,7 +351,6 @@ def get_alert_level(rsi5, rsi15, vol_spike, p1h):
 
     return 1
 
-
 def level_emoji(level):
 
     if level == 3:
@@ -278,10 +361,9 @@ def level_emoji(level):
 
     return "🚨"
 
-
-# =========================
-# FORMAT
-# =========================
+# =========================================================
+# FORMAT MESSAGE
+# =========================================================
 
 def format_msg(c):
 
@@ -289,7 +371,11 @@ def format_msg(c):
 
     emoji = level_emoji(level)
 
-    msg = f"""
+    now = datetime.now(
+        timezone.utc
+    ).strftime("%H:%M UTC")
+
+    return f"""
 {emoji} FUTURES PUMP ALERT
 
 🔥 {c['symbol']}
@@ -305,38 +391,30 @@ def format_msg(c):
 📦 Vol spike: {c['vol_spike']}x
 💸 Funding: {c['funding']}%
 
-🔥 LEVEL {level} EXHAUSTION
+🔥 LEVEL {level}
 👀 SHORT WATCHLIST
-"""
 
-    return msg.strip()
+⏰ {now}
+""".strip()
 
-
-# =========================
+# =========================================================
 # MAIN
-# =========================
+# =========================================================
 
 def main():
 
-    now = datetime.now(timezone.utc).strftime("%H:%M UTC %d/%m/%Y")
+    now = datetime.now(
+        timezone.utc
+    ).strftime("%H:%M UTC %d/%m/%Y")
 
-    log.info("Scanning Binance Futures...")
+    log.info("Scanning Bybit Futures...")
 
-    try:
-        tickers = get_futures_tickers()
-
-    except Exception as e:
-
-        send_tg(
-            f"❌ Binance Futures API error\n{e}"
-        )
-
-        return
+    tickers = get_futures_tickers()
 
     if not tickers:
 
         send_tg(
-            f"❌ No futures gainers found\n{now}"
+            f"❌ Bybit API failed\n{now}"
         )
 
         return
@@ -363,7 +441,6 @@ def main():
 
             funding = get_funding(symbol)
 
-            # skip weak setups
             if not rsi5 or not rsi15:
                 continue
 
@@ -390,22 +467,21 @@ def main():
             log.info(
                 f"{symbol} | "
                 f"RSI5={rsi5} | "
-                f"RSI15={rsi15} | "
-                f"VOL={vol_spike}x"
+                f"RSI15={rsi15}"
             )
 
         except Exception as e:
 
-            log.warning(f"{symbol} error: {e}")
-
-            continue
+            log.warning(
+                f"{symbol} error: {e}"
+            )
 
         time.sleep(0.08)
 
     if not results:
 
         send_tg(
-            f"🔇 No strong exhaustion setup\n{now}"
+            f"🔇 No hot setups\n{now}"
         )
 
         return
@@ -420,8 +496,8 @@ def main():
     )
 
     send_tg(
-        f"🔥 Binance Futures Scanner\n"
-        f"{len(results)} hot coins found\n"
+        f"🔥 Bybit Futures Scanner\n"
+        f"{len(results)} hot coins\n"
         f"{now}"
     )
 
@@ -433,8 +509,9 @@ def main():
 
         time.sleep(0.5)
 
-    log.info(f"Sent {len(results)} alerts")
-
+    log.info(
+        f"Sent {len(results)} alerts"
+    )
 
 if __name__ == "__main__":
     main()
