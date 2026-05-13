@@ -1,16 +1,20 @@
 import requests
 import time
-import numpy as np
 from datetime import datetime
+
+# =========================================================
+# CONFIG
+# =========================================================
 
 TELEGRAM_TOKEN = "8608021789:AAEUUZiHs3j8e1Xv5lbuEyMhpylpfkxe7HE"
 CHAT_ID = "5259562355"
 
-MIN_24H = 8
+MIN_24H_CHANGE = 5
+MIN_VOLUME = 1_000_000
 
-# ==========================================
+# =========================================================
 # TELEGRAM
-# ==========================================
+# =========================================================
 
 def send(text):
 
@@ -22,51 +26,12 @@ def send(text):
             "chat_id": CHAT_ID,
             "text": text
         },
-        timeout=10
+        timeout=15
     )
 
-# ==========================================
-# RSI
-# ==========================================
-
-def calc_rsi(closes, period=14):
-
-    if len(closes) < period + 1:
-        return None
-
-    deltas = np.diff(closes)
-
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-
-    avg_gain = np.mean(gains[:period])
-    avg_loss = np.mean(losses[:period])
-
-    for i in range(period, len(gains)):
-
-        avg_gain = (
-            avg_gain * (period - 1)
-            + gains[i]
-        ) / period
-
-        avg_loss = (
-            avg_loss * (period - 1)
-            + losses[i]
-        ) / period
-
-    if avg_loss == 0:
-        return 100
-
-    rs = avg_gain / avg_loss
-
-    return round(
-        100 - (100 / (1 + rs)),
-        1
-    )
-
-# ==========================================
-# GET TOP GAINERS
-# ==========================================
+# =========================================================
+# GET GAINERS
+# =========================================================
 
 def get_gainers():
 
@@ -75,7 +40,7 @@ def get_gainers():
     params = {
         "vs_currency": "usd",
         "order": "price_change_percentage_24h_desc",
-        "per_page": 50,
+        "per_page": 100,
         "page": 1,
         "sparkline": False
     }
@@ -83,7 +48,7 @@ def get_gainers():
     r = requests.get(
         url,
         params=params,
-        timeout=20
+        timeout=30
     )
 
     data = r.json()
@@ -94,7 +59,7 @@ def get_gainers():
 
         try:
 
-            change = c.get(
+            change_24h = c.get(
                 "price_change_percentage_24h",
                 0
             )
@@ -104,57 +69,79 @@ def get_gainers():
                 0
             )
 
-            if change < MIN_24H:
+            market_cap = c.get(
+                "market_cap",
+                1
+            )
+
+            if change_24h < MIN_24H_CHANGE:
                 continue
 
-            if volume < 5_000_000:
+            if volume < MIN_VOLUME:
+                continue
+
+            # =================================================
+            # ALPHA SCORE
+            # =================================================
+
+            vol_mc_ratio = volume / max(market_cap, 1)
+
+            score = (
+                change_24h
+                + min(vol_mc_ratio * 100, 100)
+            )
+
+            # small-mid cap bonus
+            if market_cap < 500_000_000:
+                score += 15
+
+            elif market_cap < 2_000_000_000:
+                score += 8
+
+            # mega volume bonus
+            if volume > 50_000_000:
+                score += 10
+
+            if score < 25:
                 continue
 
             results.append({
-                "id": c["id"],
                 "symbol": c["symbol"].upper(),
                 "name": c["name"],
                 "price": c["current_price"],
-                "change": round(change, 2),
-                "volume": volume
+                "change": round(change_24h, 2),
+                "volume": volume,
+                "market_cap": market_cap,
+                "score": round(score, 1)
             })
 
         except:
             continue
 
-    return results[:20]
-
-# ==========================================
-# GET CHART
-# ==========================================
-
-def get_chart(coin_id):
-
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
-
-    params = {
-        "vs_currency": "usd",
-        "days": "1",
-        "interval": "hourly"
-    }
-
-    r = requests.get(
-        url,
-        params=params,
-        timeout=20
+    results.sort(
+        key=lambda x: x["score"],
+        reverse=True
     )
 
-    data = r.json()
+    return results[:20]
 
-    prices = data["prices"]
+# =========================================================
+# ALERT LEVEL
+# =========================================================
 
-    closes = [p[1] for p in prices]
+def get_level(score):
 
-    return closes
+    if score >= 80:
+        return "🚨🚨🚨"
 
-# ==========================================
+    if score >= 50:
+        return "🚨🚨"
+
+    return "🚨"
+
+# =========================================================
 # MAIN
-# ==========================================
+# =========================================================
 
 def main():
 
@@ -174,13 +161,13 @@ def main():
 
     if not gainers:
 
-        send("❌ No gainers found")
+        send("❌ No alpha coins found")
 
         return
 
     send(
-        f"🔥 Alpha Scanner Started\n"
-        f"{len(gainers)} gainers\n"
+        f"🔥 ALPHA FUTURES SCANNER\n"
+        f"{len(gainers)} hot coins found\n"
         f"{now}"
     )
 
@@ -188,34 +175,30 @@ def main():
 
         try:
 
-            closes = get_chart(c["id"])
+            level = get_level(c["score"])
 
-            rsi = calc_rsi(closes)
+            volume_m = round(
+                c["volume"] / 1_000_000,
+                1
+            )
 
-            if not rsi:
-                continue
-
-            if rsi < 70:
-                continue
-
-            level = "🚨"
-
-            if rsi >= 85:
-                level = "🚨🚨🚨"
-
-            elif rsi >= 78:
-                level = "🚨🚨"
+            marketcap_m = round(
+                c["market_cap"] / 1_000_000,
+                1
+            )
 
             msg = f"""
-{level} PUMP ALERT
+{level} ALPHA PUMP ALERT
 
 🔥 {c['symbol']}
 💰 ${c['price']}
 
 📈 24h: +{c['change']}%
-📊 RSI: {rsi}
 
-💵 Vol: ${round(c['volume']/1_000_000,1)}M
+⚡ Alpha Score: {c['score']}
+
+💵 Volume: ${volume_m}M
+🏦 MCap: ${marketcap_m}M
 
 👀 SHORT WATCHLIST
 """
