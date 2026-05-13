@@ -10,19 +10,14 @@ from datetime import datetime
 TELEGRAM_TOKEN = "8608021789:AAEUUZiHs3j8e1Xv5lbuEyMhpylpfkxe7HE"
 CHAT_ID = "5259562355"
 
-MIN_24H_CHANGE = 5
-MIN_VOLUME = 1_000_000
-
 # =========================================================
 # TELEGRAM
 # =========================================================
 
 def send(text):
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
     requests.post(
-        url,
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
         json={
             "chat_id": CHAT_ID,
             "text": text
@@ -72,24 +67,7 @@ def calc_rsi(closes, period=14):
     )
 
 # =========================================================
-# TELEGRAM
-# =========================================================
-
-def send(text):
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    requests.post(
-        url,
-        json={
-            "chat_id": CHAT_ID,
-            "text": text
-        },
-        timeout=15
-    )
-
-# =========================================================
-# GET GAINERS
+# GET MARKET MOVERS
 # =========================================================
 
 def get_coins():
@@ -98,8 +76,8 @@ def get_coins():
 
     params = {
         "vs_currency": "usd",
-        "order": "price_change_percentage_24h_desc",
-        "per_page": 100,
+        "order": "volume_desc",
+        "per_page": 250,
         "page": 1,
         "sparkline": False
     }
@@ -128,38 +106,13 @@ def get_coins():
                 0
             )
 
-            market_cap = c.get(
-                "market_cap",
-                1
-            )
-
-            if change < MIN_24H_CHANGE:
+            if abs(change) < 5:
                 continue
 
-            if volume < MIN_VOLUME:
-                continue
-
-            # =============================================
-            # BASE SCORE
-            # =============================================
-
-            score = change
-
-            vol_mc = volume / max(market_cap, 1)
-
-            score += min(
-                vol_mc * 100,
-                80
+            score = (
+                abs(change)
+                + min(volume / 20_000_000, 50)
             )
-
-            if market_cap < 500_000_000:
-                score += 15
-
-            elif market_cap < 2_000_000_000:
-                score += 8
-
-            if volume > 50_000_000:
-                score += 10
 
             results.append({
                 "id": c["id"],
@@ -167,7 +120,6 @@ def get_coins():
                 "price": c["current_price"],
                 "change": round(change, 2),
                 "volume": volume,
-                "market_cap": market_cap,
                 "score": round(score, 1)
             })
 
@@ -179,10 +131,10 @@ def get_coins():
         reverse=True
     )
 
-    return results[:20]
+    return results[:30]
 
 # =========================================================
-# GET CHART
+# GET PRICE DATA
 # =========================================================
 
 def get_chart(coin_id, days):
@@ -216,26 +168,20 @@ def get_chart(coin_id, days):
 # MULTI RSI
 # =========================================================
 
-def get_multi_rsi(coin_id):
+def get_rsis(coin_id):
 
     try:
 
-        day1 = get_chart(coin_id, "1")
-        day7 = get_chart(coin_id, "7")
-        day30 = get_chart(coin_id, "30")
-
-        rsi_15m = calc_rsi(day1[-20:])
-        rsi_1h = calc_rsi(day1[-40:])
-        rsi_4h = calc_rsi(day7[-40:])
-        rsi_12h = calc_rsi(day30[-30:])
-        rsi_1d = calc_rsi(day30[-60:])
+        d1 = get_chart(coin_id, "1")
+        d7 = get_chart(coin_id, "7")
+        d30 = get_chart(coin_id, "30")
 
         return {
-            "15m": rsi_15m,
-            "1h": rsi_1h,
-            "4h": rsi_4h,
-            "12h": rsi_12h,
-            "1d": rsi_1d
+            "15m": calc_rsi(d1[-20:]),
+            "1h": calc_rsi(d1[-40:]),
+            "4h": calc_rsi(d7[-40:]),
+            "12h": calc_rsi(d30[-40:]),
+            "1d": calc_rsi(d30[-80:])
         }
 
     except:
@@ -260,44 +206,47 @@ def classify(rsis):
     r12 = rsis["12h"]
     r1d = rsis["1d"]
 
+    # live parabolic squeeze
     if (
-        r4h >= 80
-        and r12 >= 80
-        and r1d >= 75
+        r15 >= 85
+        and r1h >= 80
     ):
-        return "☠️ BLOWOFF TOP"
+        return "☠️ LIVE SHORT SQUEEZE"
 
+    # extremely strong trend
     if (
-        r1h >= 75
-        and r4h >= 75
-        and r12 >= 70
+        r15 >= 80
+        and r1h >= 75
+        and r4h >= 70
     ):
         return "🚀 SUPER PUMP"
 
+    # strong continuation
     if (
         r15 >= 70
         and r1h >= 70
     ):
         return "🔥 STRONG PUMP"
 
+    # beginning momentum
     if r15 >= 65:
         return "🌱 EARLY PUMP"
 
     return "🟡 NORMAL"
 
 # =========================================================
-# LEVEL
+# ALERT LEVEL
 # =========================================================
 
-def get_level(score):
-
-    if score >= 100:
-        return "☠️☠️☠️"
+def level(score):
 
     if score >= 70:
+        return "☠️☠️☠️"
+
+    if score >= 50:
         return "🚨🚨🚨"
 
-    if score >= 45:
+    if score >= 30:
         return "🚨🚨"
 
     return "🚨"
@@ -322,15 +271,9 @@ def main():
 
         return
 
-    if not coins:
-
-        send("❌ No coins found")
-
-        return
-
     send(
-        f"🔥 MULTI RSI FUTURES SCANNER\n"
-        f"{len(coins)} hot coins\n"
+        f"🔥 LIVE MOMENTUM SCANNER\n"
+        f"{len(coins)} movers\n"
         f"{now}"
     )
 
@@ -338,21 +281,21 @@ def main():
 
         try:
 
-            rsis = get_multi_rsi(c["id"])
+            rsis = get_rsis(c["id"])
 
-            pump_type = classify(rsis)
+            pump = classify(rsis)
 
-            level = get_level(c["score"])
+            lv = level(c["score"])
 
             msg = f"""
-{level} {pump_type}
+{lv} {pump}
 
 🔥 {c['symbol']}
 💰 ${c['price']}
 
-📈 24h: +{c['change']}%
+📈 24h: {c['change']}%
 
-⚡ Score: {c['score']}
+⚡ Momentum: {c['score']}
 
 RSI:
 15m: {rsis['15m']}
@@ -362,7 +305,6 @@ RSI:
 1D: {rsis['1d']}
 
 💵 Vol: ${round(c['volume']/1_000_000,1)}M
-🏦 MCap: ${round(c['market_cap']/1_000_000,1)}M
 
 👀 SHORT WATCHLIST
 """
