@@ -26,14 +26,14 @@ def send(text):
             "chat_id": CHAT_ID,
             "text": text
         },
-        timeout=15
+        timeout=20
     )
 
 # =========================================================
-# GET GAINERS
+# COINGECKO GAINERS
 # =========================================================
 
-def get_gainers():
+def get_coingecko():
 
     url = "https://api.coingecko.com/api/v3/coins/markets"
 
@@ -59,7 +59,7 @@ def get_gainers():
 
         try:
 
-            change_24h = c.get(
+            change = c.get(
                 "price_change_percentage_24h",
                 0
             )
@@ -74,56 +74,141 @@ def get_gainers():
                 1
             )
 
-            if change_24h < MIN_24H_CHANGE:
+            if change < MIN_24H_CHANGE:
                 continue
 
             if volume < MIN_VOLUME:
                 continue
 
-            # =================================================
-            # ALPHA SCORE
-            # =================================================
+            score = change
 
-            vol_mc_ratio = volume / max(market_cap, 1)
+            # volume strength
+            vol_mc = volume / max(market_cap, 1)
 
-            score = (
-                change_24h
-                + min(vol_mc_ratio * 100, 100)
+            score += min(
+                vol_mc * 100,
+                80
             )
 
-            # small-mid cap bonus
+            # small cap bonus
             if market_cap < 500_000_000:
                 score += 15
 
             elif market_cap < 2_000_000_000:
                 score += 8
 
-            # mega volume bonus
+            # giga volume
             if volume > 50_000_000:
                 score += 10
 
-            if score < 25:
-                continue
-
             results.append({
                 "symbol": c["symbol"].upper(),
-                "name": c["name"],
                 "price": c["current_price"],
-                "change": round(change_24h, 2),
+                "change": round(change, 2),
                 "volume": volume,
                 "market_cap": market_cap,
-                "score": round(score, 1)
+                "score": round(score, 1),
+                "source": "CoinGecko"
             })
 
         except:
             continue
 
-    results.sort(
-        key=lambda x: x["score"],
-        reverse=True
-    )
+    return results
 
-    return results[:20]
+# =========================================================
+# DEXSCREENER TRENDING
+# =========================================================
+
+def get_dexscreener():
+
+    url = "https://api.dexscreener.com/latest/dex/search"
+
+    keywords = [
+        "lab",
+        "cos",
+        "bill",
+        "meme",
+        "ai"
+    ]
+
+    results = []
+
+    for k in keywords:
+
+        try:
+
+            r = requests.get(
+                url,
+                params={"q": k},
+                timeout=20
+            )
+
+            data = r.json()
+
+            pairs = data.get("pairs", [])
+
+            for p in pairs[:5]:
+
+                try:
+
+                    symbol = p["baseToken"]["symbol"]
+
+                    volume = float(
+                        p.get("volume", {}).get(
+                            "h24",
+                            0
+                        )
+                    )
+
+                    change = float(
+                        p.get("priceChange", {}).get(
+                            "h24",
+                            0
+                        )
+                    )
+
+                    liquidity = float(
+                        p.get("liquidity", {}).get(
+                            "usd",
+                            0
+                        )
+                    )
+
+                    price = float(
+                        p.get("priceUsd", 0)
+                    )
+
+                    if change < 10:
+                        continue
+
+                    score = (
+                        change
+                        + min(volume / 1_000_000, 50)
+                    )
+
+                    if liquidity < 100_000:
+                        score += 10
+
+                    results.append({
+                        "symbol": symbol,
+                        "price": price,
+                        "change": round(change, 2),
+                        "volume": volume,
+                        "market_cap": liquidity,
+                        "score": round(score, 1),
+                        "source": "DexScreener"
+                    })
+
+                except:
+                    continue
+
+        except:
+            continue
+
+        time.sleep(0.5)
+
+    return results
 
 # =========================================================
 # ALERT LEVEL
@@ -149,29 +234,82 @@ def main():
         "%H:%M UTC %d/%m/%Y"
     )
 
+    all_coins = []
+
+    # =====================================================
+    # COINGECKO
+    # =====================================================
+
     try:
 
-        gainers = get_gainers()
+        cg = get_coingecko()
+
+        all_coins.extend(cg)
 
     except Exception as e:
 
-        send(f"❌ API ERROR\n{e}")
+        print("CG ERROR", e)
 
-        return
+    # =====================================================
+    # DEXSCREENER
+    # =====================================================
 
-    if not gainers:
+    try:
+
+        ds = get_dexscreener()
+
+        all_coins.extend(ds)
+
+    except Exception as e:
+
+        print("DEX ERROR", e)
+
+    if not all_coins:
 
         send("❌ No alpha coins found")
 
         return
 
+    # =====================================================
+    # SORT
+    # =====================================================
+
+    all_coins.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    # remove duplicates
+    final = []
+
+    seen = set()
+
+    for c in all_coins:
+
+        if c["symbol"] in seen:
+            continue
+
+        seen.add(c["symbol"])
+
+        final.append(c)
+
+    final = final[:20]
+
+    # =====================================================
+    # HEADER
+    # =====================================================
+
     send(
         f"🔥 ALPHA FUTURES SCANNER\n"
-        f"{len(gainers)} hot coins found\n"
+        f"{len(final)} hot coins\n"
         f"{now}"
     )
 
-    for c in gainers:
+    # =====================================================
+    # SEND ALERTS
+    # =====================================================
+
+    for c in final:
 
         try:
 
@@ -195,10 +333,12 @@ def main():
 
 📈 24h: +{c['change']}%
 
-⚡ Alpha Score: {c['score']}
+⚡ Score: {c['score']}
 
 💵 Volume: ${volume_m}M
-🏦 MCap: ${marketcap_m}M
+🏦 Size: ${marketcap_m}M
+
+📡 Source: {c['source']}
 
 👀 SHORT WATCHLIST
 """
