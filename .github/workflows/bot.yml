@@ -1,0 +1,26 @@
+name: Alpha Pump Bot
+
+on:
+  schedule:
+    - cron: '*/30 * * * *'   # Chạy mỗi 30 phút
+  workflow_dispatch:           # Cho phép chạy thủ công để test
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests numpy python-telegram-bot
+
+      - name: Run bot
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          CHAT_ID: ${{ secrets.CHAT_ID }}
+        run: python bot.py
