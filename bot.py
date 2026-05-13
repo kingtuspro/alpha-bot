@@ -139,44 +139,78 @@ def get_coins():
             if volume < MIN_VOLUME:
                 continue
 
+            # =============================================
+            # BASE SCORE
+            # =============================================
+
+            score = change
+
+            vol_mc = volume / max(market_cap, 1)
+
+            score += min(
+                vol_mc * 100,
+                80
+            )
+
+            if market_cap < 500_000_000:
+                score += 15
+
+            elif market_cap < 2_000_000_000:
+                score += 8
+
+            if volume > 50_000_000:
+                score += 10
+
             results.append({
                 "id": c["id"],
                 "symbol": c["symbol"].upper(),
                 "price": c["current_price"],
                 "change": round(change, 2),
                 "volume": volume,
-                "market_cap": market_cap
+                "market_cap": market_cap,
+                "score": round(score, 1)
             })
 
         except:
             continue
 
-    return results
+    results.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    return results[:20]
 
 # =========================================================
-# GET PRICE CHART
+# GET CHART
 # =========================================================
 
 def get_chart(coin_id, days):
 
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
+    try:
 
-    params = {
-        "vs_currency": "usd",
-        "days": days
-    }
+        url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/market_chart"
 
-    r = requests.get(
-        url,
-        params=params,
-        timeout=30
-    )
+        params = {
+            "vs_currency": "usd",
+            "days": days
+        }
 
-    data = r.json()
+        r = requests.get(
+            url,
+            params=params,
+            timeout=30
+        )
 
-    prices = data["prices"]
+        data = r.json()
 
-    return [p[1] for p in prices]
+        prices = data["prices"]
+
+        return [p[1] for p in prices]
+
+    except:
+
+        return []
 
 # =========================================================
 # MULTI RSI
@@ -186,25 +220,15 @@ def get_multi_rsi(coin_id):
 
     try:
 
-        rsi_15m = calc_rsi(
-            get_chart(coin_id, "1")[-20:]
-        )
+        day1 = get_chart(coin_id, "1")
+        day7 = get_chart(coin_id, "7")
+        day30 = get_chart(coin_id, "30")
 
-        rsi_1h = calc_rsi(
-            get_chart(coin_id, "1")[-40:]
-        )
-
-        rsi_4h = calc_rsi(
-            get_chart(coin_id, "7")[-40:]
-        )
-
-        rsi_12h = calc_rsi(
-            get_chart(coin_id, "14")[-40:]
-        )
-
-        rsi_1d = calc_rsi(
-            get_chart(coin_id, "30")[-40:]
-        )
+        rsi_15m = calc_rsi(day1[-20:])
+        rsi_1h = calc_rsi(day1[-40:])
+        rsi_4h = calc_rsi(day7[-40:])
+        rsi_12h = calc_rsi(day30[-30:])
+        rsi_1d = calc_rsi(day30[-60:])
 
         return {
             "15m": rsi_15m,
@@ -216,75 +240,50 @@ def get_multi_rsi(coin_id):
 
     except:
 
-        return None
+        return {
+            "15m": 50,
+            "1h": 50,
+            "4h": 50,
+            "12h": 50,
+            "1d": 50
+        }
 
 # =========================================================
 # CLASSIFY
 # =========================================================
 
-def classify_pump(rsis):
+def classify(rsis):
 
-    hot = 0
+    r15 = rsis["15m"]
+    r1h = rsis["1h"]
+    r4h = rsis["4h"]
+    r12 = rsis["12h"]
+    r1d = rsis["1d"]
 
-    for r in rsis.values():
-
-        if r >= 70:
-            hot += 1
-
-    if hot >= 5:
+    if (
+        r4h >= 80
+        and r12 >= 80
+        and r1d >= 75
+    ):
         return "☠️ BLOWOFF TOP"
 
     if (
-        rsis["4h"] >= 75
-        and rsis["12h"] >= 75
-        and rsis["1d"] >= 70
+        r1h >= 75
+        and r4h >= 75
+        and r12 >= 70
     ):
         return "🚀 SUPER PUMP"
 
     if (
-        rsis["15m"] >= 70
-        and rsis["1h"] >= 70
-        and rsis["4h"] >= 70
+        r15 >= 70
+        and r1h >= 70
     ):
         return "🔥 STRONG PUMP"
 
-    if rsis["15m"] >= 70:
+    if r15 >= 65:
         return "🌱 EARLY PUMP"
 
     return "🟡 NORMAL"
-
-# =========================================================
-# SCORE
-# =========================================================
-
-def calc_score(change, volume, market_cap, rsis):
-
-    score = change
-
-    vol_mc = volume / max(market_cap, 1)
-
-    score += min(
-        vol_mc * 100,
-        80
-    )
-
-    if market_cap < 500_000_000:
-        score += 15
-
-    if volume > 50_000_000:
-        score += 10
-
-    # RSI bonuses
-
-    for r in rsis.values():
-
-        if r >= 70:
-            score += 5
-
-        if r >= 80:
-            score += 5
-
-    return round(score, 1)
 
 # =========================================================
 # LEVEL
@@ -323,59 +322,30 @@ def main():
 
         return
 
-    final = []
+    if not coins:
 
-    for c in coins[:20]:
+        send("❌ No coins found")
+
+        return
+
+    send(
+        f"🔥 MULTI RSI FUTURES SCANNER\n"
+        f"{len(coins)} hot coins\n"
+        f"{now}"
+    )
+
+    for c in coins:
 
         try:
 
             rsis = get_multi_rsi(c["id"])
 
-            if not rsis:
-                continue
-
-            pump_type = classify_pump(rsis)
-
-            score = calc_score(
-                c["change"],
-                c["volume"],
-                c["market_cap"],
-                rsis
-            )
-
-            c["rsis"] = rsis
-            c["score"] = score
-            c["pump_type"] = pump_type
-
-            final.append(c)
-
-            time.sleep(1)
-
-        except Exception as e:
-
-            print(e)
-
-            continue
-
-    final.sort(
-        key=lambda x: x["score"],
-        reverse=True
-    )
-
-    send(
-        f"🔥 MULTI RSI FUTURES SCANNER\n"
-        f"{len(final)} hot coins\n"
-        f"{now}"
-    )
-
-    for c in final[:15]:
-
-        try:
+            pump_type = classify(rsis)
 
             level = get_level(c["score"])
 
             msg = f"""
-{level} {c['pump_type']}
+{level} {pump_type}
 
 🔥 {c['symbol']}
 💰 ${c['price']}
@@ -385,13 +355,14 @@ def main():
 ⚡ Score: {c['score']}
 
 RSI:
-15m: {c['rsis']['15m']}
-1h: {c['rsis']['1h']}
-4h: {c['rsis']['4h']}
-12h: {c['rsis']['12h']}
-1D: {c['rsis']['1d']}
+15m: {rsis['15m']}
+1h: {rsis['1h']}
+4h: {rsis['4h']}
+12h: {rsis['12h']}
+1D: {rsis['1d']}
 
 💵 Vol: ${round(c['volume']/1_000_000,1)}M
+🏦 MCap: ${round(c['market_cap']/1_000_000,1)}M
 
 👀 SHORT WATCHLIST
 """
@@ -400,7 +371,10 @@ RSI:
 
             time.sleep(1)
 
-        except:
+        except Exception as e:
+
+            print(e)
+
             continue
 
 if __name__ == "__main__":
