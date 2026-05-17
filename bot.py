@@ -8,7 +8,7 @@ from datetime import datetime
 # =========================================================
 
 TELEGRAM_TOKEN = "8608021789:AAEUUZiHs3j8e1Xv5lbuEyMhpylpfkxe7HE"
-CHAT_ID = "5259562355"
+CHAT_ID = "-5097800535"
 
 # =========================================================
 # TELEGRAM
